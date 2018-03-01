@@ -1,8 +1,4 @@
 # Databricks notebook source
-# MAGIC %sh git init
-
-# COMMAND ----------
-
 # init script for the cluster, https://docs.databricks.com/user-guide/clusters/init-scripts.html 
 dbutils.fs.mkdirs("dbfs:/databricks/init/")
 
