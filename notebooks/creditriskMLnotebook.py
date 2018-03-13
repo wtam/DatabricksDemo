@@ -129,7 +129,8 @@ def mlpclf(X_train, y_train, X_test, y_test):
 
 # COMMAND ----------
 
-
+#--unMount the file system before reMount it below
+dbutils.fs.unmount("/mnt/clusters/sparkcluster")
 
 # COMMAND ----------
 
