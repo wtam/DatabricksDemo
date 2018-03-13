@@ -101,7 +101,7 @@ print(xls.sheet_names)
 
 # COMMAND ----------
 
-# NO NEED TO DOWNLOAD THE TAR FILES, JUST Directly READ FROM datalakestore
+# NO NEED TO DOWNLOAD THE TAR FILES FROM datalakestore to the datalake File System, JUST Directly READ FROM datalakestore
 # Note: 
 #  - somehow the donwlod files are not shown in the local folder if run on Databricks, DLTK_IXI_Dataset?????
 #  - it's too slow so lets try mutlithread download
@@ -116,6 +116,7 @@ print(xls.sheet_names)
 
 # COMMAND ----------
 
+# Create a dolder DLTK_IXI_Dataset in the root datalakestore, which is under storebotdatlakestore
 ##adlsFileSystemClient.mkdir(path='DLTK_IXI_Dataset')
 
 # COMMAND ----------
@@ -165,21 +166,89 @@ CLEAN_UP = True
 
 # COMMAND ----------
 
-#--Mounting Azure Data Lake Stores with DBFS (Databricks File System) so that tar extract output directly to datalakestore
-configs = {"dfs.adls.oauth2.access.token.provider.type": "ClientCredential",
-           "dfs.adls.oauth2.client.id": "55f2dd64-39d7-4fa5-a12b-5da3bf6e1d50",
-           "dfs.adls.oauth2.credential": "yeZZZBYVlWvdbAhPA4EulPtNrlai0GZwdb6vOoHwl8Q=",
-           "dfs.adls.oauth2.refresh.url": "https://login.microsoftonline.com/4dced229-4c95-476d-b76b-34d306d723eb/oauth2/token"}
-
-dbutils.fs.mount(source = "adl://storebotdatalakestore.azuredatalakestore.net/clusters/", 
-                 mount_point = "/mnt/clusters",
-                 extra_configs = configs)
-#--Note:if you see extra_configs param error, switch the runtime to 4.0 by creating a new cluster(standard allow you to spefic the rutime version, bot the serverless)
+# show the local file path
+##os.listdir("/clusters/DLTK_IXI_Dataset")
 
 # COMMAND ----------
 
-#--SKIP this step unless you want to unmount a mount point
-dbutils.fs.unmount("/mnt/clusters")
+# show the local file path
+##os.listdir("/clusters/DLTK_IXI_Dataset/T2")
+
+# COMMAND ----------
+
+# Create datlakestore directories for below IXI_Dataset tar file extraction
+# Note: Since its need to done once, so comment it
+#adlsFileSystemClient.mkdir(path='/clusters/DLTK_IXI_Dataset/T1')
+##adlsFileSystemClient.mkdir(path='/clusters/DLTK_IXI_Dataset/T2')
+##adlsFileSystemClient.mkdir(path='/clusters/DLTK_IXI_Dataset/MRA')
+##adlsFileSystemClient.mkdir(path='/clusters/DLTK_IXI_Dataset/PD')
+#
+##adlsFileSystemClient.mkdir('/clusters/DLTK_IXI_Dataset/1mm/')
+##adlsFileSystemClient.mkdir('/clusters/DLTK_IXI_Dataset/2mm/')
+#
+#Below tar file extraction take very long time, so use Databricks job scheduling if need to repeat
+
+# COMMAND ----------
+
+# DONT RUN THis NEXT TIME
+# Note: This only need to extract one time!! no need to re-extract the tar files again.  
+fnames = {}
+fnames['T1'] = '/clusters/DLTK_IXI_Dataset/IXI-T1.tar'
+fnames['T2'] = '/clusters/DLTK_IXI_Dataset/IXI-T2.tar'
+fnames['MRA'] = '/clusters/DLTK_IXI_Dataset/IXI-MRA.tar'
+fnames['PD'] = '/clusters/DLTK_IXI_Dataset/IXI-PD.tar'
+##fnames['demographic'] = '/clusters/DLTK_IXI_Dataset/IXI.xls'
+
+## Extract all the HH images to t1 or t2 directory.......
+if EXTRACT_IMAGES:
+    # Extract the HH subset of IXI
+    for key, fname in fnames.items():
+        if (fname.endswith('.tar')):
+            print('Extracting IXI HH data from {}.'.format(fnames[key]))
+            output_dir = os.path.join('/clusters/DLTK_IXI_Dataset', key)
+            ## Create a output directory
+            if not os.path.exists(output_dir):
+                os.makedirs(output_dir)
+            print("outputdir: ", output_dir)
+            with adlsFileSystemClient.open(fnames[key], 'rb') as f:
+                t = tarfile.open(name=key, fileobj=f, mode='r', debug=2)
+                for member in t.getmembers():
+                  if '-HH-' in member.name:
+                     t.extract(member, output_dir)
+                     ## Extract and store into the Datalakes Store new folder
+                     multithread.ADLUploader(adlsFileSystemClient, lpath=output_dir, rpath=output_dir, nthreads=64, overwrite=True, buffersize=4194304, blocksize=4194304)
+
+
+# COMMAND ----------
+
+if PROCESS_OTHER:
+    # Process the demographic xls data and save to csv
+    with adlsFileSystemClient.open('/clusters/DLTK_IXI_Dataset/IXI.xls', 'rb') as f:
+      xls= pd.ExcelFile(f)
+    print(xls.sheet_names)
+
+    df = xls.parse('Table')
+    for index, row in df.iterrows():
+        IXI_id = 'IXI{:03d}'.format(row['IXI_ID'])
+        df.loc[index, 'IXI_ID'] = IXI_id
+
+        t1_exists = len(glob.glob('/clusters/DLTK_IXI_Dataset/T1/{}*.nii.gz'.format(IXI_id)))
+        t2_exists = len(glob.glob('/clusters/DLTK_IXI_Dataset/T2/{}*.nii.gz'.format(IXI_id)))
+        pd_exists = len(glob.glob('/clusters/DLTK_IXI_Dataset/PD/{}*.nii.gz'.format(IXI_id)))
+        mra_exists = len(glob.glob('/clusters/DLTK_IXI_Dataset/MRA/{}*.nii.gz'.format(IXI_id)))
+
+        # Check if each entry is complete and drop if not
+        # if not t1_exists and not t2_exists and not pd_exists and not mra
+        # exists:
+        if not (t1_exists and t2_exists and pd_exists and mra_exists):
+            print(IXI_id, t1_exists, t2_exists, pd_exists, mra_exists)
+            df.drop(index, inplace=True)
+
+    # Write to csv file (local file path)
+    df.to_csv('/clusters/DLTK_IXI_Dataset/demographic_HH.csv', index=False)
+    # upload the csv to the datalakestore
+    multithread.ADLUploader(adlsFileSystemClient, lpath='/clusters/DLTK_IXI_Dataset/demographic_HH.csv', rpath='/clusters/DLTK_IXI_Dataset/demographic_HH.csv', nthreads=64, overwrite=True, buffersize=4194304, blocksize=4194304)
+
 
 # COMMAND ----------
 
@@ -218,56 +287,78 @@ def reslice_image(itk_image, itk_ref, is_label=False):
 
     return resample.Execute(itk_image)
 
-fnames = {}
-fnames['IXI-T1.tar'] = '/clusters/DLTK_IXI_Dataset/IXI-T1.tar'
-fnames['IXI-T2.tar'] = '/clusters/DLTK_IXI_Dataset/IXI-T2.tar'
-fnames['IXI-MRA.tar'] = '/clusters/DLTK_IXI_Dataset/IXI-MRA.tar'
-fnames['IXI-PD.tar'] = '/clusters/DLTK_IXI_Dataset/IXI-PD.tar'
-##fnames['demographic'] = IXI_xls
+# COMMAND ----------
 
-## Extract all the HH images to t1 or t2 directory.......
-if EXTRACT_IMAGES:
-    # Extract the HH subset of IXI
-    for key, fname in fnames.items():
-        ##if (fname.endswith('.tar')):
-            print('Extracting IXI HH data from {}.'.format(fnames[key]))
-            output_dir = os.path.join('/DLTK_IXI_Dataset/', key)
-            ## Create a output directory
-            if not os.path.exists(output_dir):
-                os.makedirs(output_dir)
-            with adlsFileSystemClient.open(fnames[key], 'rb') as f:
-                t = tarfile.open(name=key, fileobj=f, mode='r', debug=2)
-                for member in t.getmembers():
-                  if '-HH-' in member.name:
-                      print("member name: ", member)
-                      t.extract(member, output_dir)
-                      ## Extract and store into the Datalakes Store new folder
-                      ##multithread.ADLUploader(adlsFileSystemClient, lpath=member.name, rpath=output_dir, nthreads=64, overwrite=True, buffersize=4194304, blocksize=4194304)
+if RESAMPLE_IMAGES:
+    # Resample the IXI HH T2 images to 1mm isotropic and reslice all
+    # others to it
+    #df = pd.read_csv('/clusters/DLTK_IXI_Dataset/demographic_HH.csv', dtype=object, keep_default_na=False, na_values=[]).as_matrix()
+    with adlsFileSystemClient.open('/clusters/DLTK_IXI_Dataset/demographic_HH.csv', 'rb') as f:
+      df = pd.read_csv(f, dtype=object, keep_default_na=False, na_values=[]).as_matrix()
+
+    for i in df:
+        IXI_id = i[0]
+        print('Resampling {}'.format(IXI_id))
+
+        t1_fn = glob.glob('/clusters/DLTK_IXI_Dataset/T1/{}*.nii.gz'.format(IXI_id))[0]
+        t2_fn = glob.glob('/clusters/DLTK_IXI_Dataset/T2/{}*.nii.gz'.format(IXI_id))[0]
+        pd_fn = glob.glob('/clusters/DLTK_IXI_Dataset/PD/{}*.nii.gz'.format(IXI_id))[0]
+        mra_fn = glob.glob('/clusters/DLTK_IXI_Dataset/MRA/{}*.nii.gz'.format(IXI_id))[0]
+
+        t1 = sitk.ReadImage(t1_fn)
+        t2 = sitk.ReadImage(t2_fn)
+        pd = sitk.ReadImage(pd_fn)
+        mra = sitk.ReadImage(mra_fn)
+
+        # Resample to 1mm isotropic resolution
+        t2_1mm = resample_image(t2)
+        t1_1mm = reslice_image(t1, t2_1mm)
+        pd_1mm = reslice_image(pd, t2_1mm)
+        mra_1mm = reslice_image(mra, t2_1mm)
+
+        output_dir = os.path.join('/clusters/DLTK_IXI_Dataset/1mm/', IXI_id)
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+
+        print('T1: {} {}'.format(t1_1mm.GetSize(), t1_1mm.GetSpacing()))
+        print('T2: {} {}'.format(t2_1mm.GetSize(), t2_1mm.GetSpacing()))
+        print('PD: {} {}'.format(pd_1mm.GetSize(), pd_1mm.GetSpacing()))
+        print('MRA: {} {}'.format(mra_1mm.GetSize(), mra_1mm.GetSpacing()))
+
+        sitk.WriteImage(t1_1mm, os.path.join(output_dir, 'T1_1mm.nii.gz'))
+        sitk.WriteImage(t2_1mm, os.path.join(output_dir, 'T2_1mm.nii.gz'))
+        sitk.WriteImage(pd_1mm, os.path.join(output_dir, 'PD_1mm.nii.gz'))
+        sitk.WriteImage(mra_1mm, os.path.join(output_dir, 'MRA_1mm.nii.gz'))
+
+        # Resample to 2mm isotropic resolution
+        t2_2mm = resample_image(t2, out_spacing=[2.0, 2.0, 2.0])
+        t1_2mm = reslice_image(t1, t2_2mm)
+        pd_2mm = reslice_image(pd, t2_2mm)
+        mra_2mm = reslice_image(mra, t2_2mm)
+
+        output_dir = os.path.join('/clusters/DLTK_IXI_Dataset/2mm/', IXI_id)
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+
+        print('T1: {} {}'.format(t2_2mm.GetSize(), t1_2mm.GetSpacing()))
+        print('T2: {} {}'.format(t2_2mm.GetSize(), t2_2mm.GetSpacing()))
+        print('PD: {} {}'.format(pd_2mm.GetSize(), pd_2mm.GetSpacing()))
+        print('MRA: {} {}'.format(mra_2mm.GetSize(), mra_2mm.GetSpacing()))
+
+        sitk.WriteImage(t1_2mm, os.path.join(output_dir, 'T1_2mm.nii.gz'))
+        sitk.WriteImage(t2_2mm, os.path.join(output_dir, 'T2_2mm.nii.gz'))
+        sitk.WriteImage(pd_2mm, os.path.join(output_dir, 'PD_2mm.nii.gz'))
+        sitk.WriteImage(mra_2mm, os.path.join(output_dir, 'MRA_2mm.nii.gz'))
 
 
 # COMMAND ----------
 
-if PROCESS_OTHER:
-    # Process the demographic xls data and save to csv
-    xls = pd.ExcelFile('/clusters/DLTK_IXI_Dataset/IXI.xls')
-    print(xls.sheet_names)
+os.listdir("/clusters/DLTK_IXI_Dataset/1mm")
 
-    df = xls.parse('Table')
-    for index, row in df.iterrows():
-        IXI_id = 'IXI{:03d}'.format(row['IXI_ID'])
-        df.loc[index, 'IXI_ID'] = IXI_id
+# COMMAND ----------
 
-        t1_exists = len(glob.glob('/IXI_Dataset/T1/{}*.nii.gz'.format(IXI_id)))
-        t2_exists = len(glob.glob('/IXI_Dataset/T2/{}*.nii.gz'.format(IXI_id)))
-        pd_exists = len(glob.glob('/IXI_Dataset/PD/{}*.nii.gz'.format(IXI_id)))
-        mra_exists = len(glob.glob('/IXI_Dataset/MRA/{}*.nii.gz'.format(IXI_id)))
+multithread.ADLUploader(adlsFileSystemClient, lpath='/clusters/DLTK_IXI_Dataset/1mm', rpath='/clusters/DLTK_IXI_Dataset/1mm', nthreads=64, overwrite=True, buffersize=4194304, blocksize=4194304)
 
-        # Check if each entry is complete and drop if not
-        # if not t1_exists and not t2_exists and not pd_exists and not mra
-        # exists:
-        if not (t1_exists and t2_exists and pd_exists and mra_exists):
-            print(IXI_id, t1_exists, t2_exists, pd_exists, mra_exists)
-            df.drop(index, inplace=True)
+# COMMAND ----------
 
-    # Write to csv file
-    df.to_csv('/IXI_Dataset/demographic_HH.csv', index=False)
+multithread.ADLUploader(adlsFileSystemClient, lpath='/clusters/DLTK_IXI_Dataset/2mm', rpath='/clusters/DLTK_IXI_Dataset/2mm', nthreads=64, overwrite=True, buffersize=4194304, blocksize=4194304)
